@@ -1,0 +1,41 @@
+ESP32 Tailscale COR – Non-Commercial License
+
+Copyright (c) 2025 CorCorMS (https://github.com/CorCorMS)
+
+Permission is granted to use, copy, modify, and distribute this software
+for non-commercial purposes only, including personal, educational, and
+open-source hobby projects.
+
+Commercial use is strictly prohibited without explicit prior written
+permission from the copyright holder. Commercial use includes, but is
+not limited to:
+  – Integration into commercial products or services
+  – Use in a business or corporate environment
+  – Sale or licensing of the software or derivatives
+  – Providing paid services based on this software
+
+For commercial licensing inquiries, please open an issue at:
+https://github.com/CorCorMS/esp32-tailscale-cor
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------
+
+Third-Party Components
+
+This project includes code from the following third-party sources:
+
+  x25519.h / x25519.c
+    Copyright (c) 2015-2016 Cryptography Research, Inc.
+    Released under the MIT License.
+    Taken from: https://sourceforge.net/p/strobe
+
+  blake2s.cpp
+    Based on RFC 7693 (https://tools.ietf.org/html/rfc7693).
+    Public domain / IETF Trust Legal Provisions.
