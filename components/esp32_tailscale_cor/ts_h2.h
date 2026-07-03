@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 CorCorMS (https://github.com/CorCorMS)
-// SPDX-License-Identifier: LicenseRef-NonCommercial
+// SPDX-License-Identifier: Apache-2.0
 //
 // See LICENSE for full license text.
 // Third-party code in this directory may have separate licensing.
@@ -21,7 +21,8 @@ enum h2_settings_id { H2_SETTINGS_HEADER_TABLE_SIZE=1, H2_SETTINGS_ENABLE_PUSH=2
 int h2_build_preface(uint8_t *out, size_t out_size);
 int h2_build_settings_ack(uint8_t *out, size_t out_size);
 int h2_build_headers_frame(uint8_t *out, size_t out_size, const char *method, const char *path, const char *scheme,
-                           const char *authority, const char *content_type, uint32_t stream_id, int end_stream);
+                           const char *authority, const char *content_type, const char *extra_header_name,
+                           const char *extra_header_value, uint32_t stream_id, int end_stream);
 int h2_build_data_frame(uint8_t *out, size_t out_size, const uint8_t *data, uint32_t data_len, uint32_t stream_id, int end_stream);
 int h2_build_ping_frame(uint8_t *out, size_t out_size, const uint8_t *opaque, int ack);
 int h2_build_window_update(uint8_t *out, size_t out_size, uint32_t stream_id, uint32_t increment);

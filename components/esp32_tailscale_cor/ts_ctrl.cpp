@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 CorCorMS (https://github.com/CorCorMS)
-// SPDX-License-Identifier: LicenseRef-NonCommercial
+// SPDX-License-Identifier: Apache-2.0
 //
 // See LICENSE for full license text.
 // Third-party code in this directory may have separate licensing.
@@ -16,8 +16,11 @@
 #include "mbedtls/net_sockets.h"
 #include "noise_ik.h"
 #include "ts_h2.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
 #include <stdio.h>
@@ -29,14 +32,180 @@ static const char *const TAG = "ts_ctrl";
 
 static constexpr size_t TSC_HTTP_BUF = 4096;
 static constexpr size_t TSC_FRAME_BUF = 18 * 1024;
-static constexpr size_t TSC_RESP_MAX = 64 * 1024;
+static constexpr size_t TSC_RESP_MAX = 40 * 1024;
 static constexpr size_t TSC_PROACTIVE_MAX = 1024;
 static constexpr const char *SERVER_HOST = "controlplane.tailscale.com";
 static constexpr uint16_t SERVER_PORT = 443;
 static constexpr const char *H2_SCHEME = "https";
 static constexpr uint16_t DEFAULT_DERP_REGION = 9;
+static constexpr uint32_t IDENTITY_PREF_MAGIC = 0x54534331UL;
+static constexpr const char *IDENTITY_PREF_KEY = "esp32_tailscale_cor.identity";
+
+struct saved_identity_t {
+  uint32_t magic;
+  uint8_t machine_key_private[32];
+  uint8_t node_key_private[32];
+  uint8_t disco_key_private[32];
+};
 
 namespace {
+
+static bool has_nonzero_bytes(const uint8_t *data, size_t len) {
+  for (size_t index = 0; index < len; index++) {
+    if (data[index] != 0) return true;
+  }
+  return false;
+}
+
+static bool is_saved_identity_valid(const saved_identity_t &saved, const char **reason) {
+  if (saved.magic != IDENTITY_PREF_MAGIC) {
+    if (reason != nullptr) *reason = "bad_magic";
+    return false;
+  }
+  if (!has_nonzero_bytes(saved.machine_key_private, sizeof(saved.machine_key_private))) {
+    if (reason != nullptr) *reason = "zero_machine";
+    return false;
+  }
+  if (!has_nonzero_bytes(saved.node_key_private, sizeof(saved.node_key_private))) {
+    if (reason != nullptr) *reason = "zero_node";
+    return false;
+  }
+  if (!has_nonzero_bytes(saved.disco_key_private, sizeof(saved.disco_key_private))) {
+    if (reason != nullptr) *reason = "zero_disco";
+    return false;
+  }
+  if (reason != nullptr) *reason = "ok";
+  return true;
+}
+
+static void derive_public_keys(ts_ctrl_t *ctrl) {
+  noise_ik_generate_keypair(ctrl->machine_key_private, ctrl->machine_key_public);
+  noise_ik_generate_keypair(ctrl->node_key_private, ctrl->node_key_public);
+  noise_ik_generate_keypair(ctrl->disco_key_private, ctrl->disco_key_public);
+}
+
+static void apply_saved_identity(ts_ctrl_t *ctrl, const saved_identity_t &saved) {
+  memcpy(ctrl->machine_key_private, saved.machine_key_private, sizeof(ctrl->machine_key_private));
+  memcpy(ctrl->node_key_private, saved.node_key_private, sizeof(ctrl->node_key_private));
+  memcpy(ctrl->disco_key_private, saved.disco_key_private, sizeof(ctrl->disco_key_private));
+  derive_public_keys(ctrl);
+}
+
+static void set_key_id(const uint8_t *public_key, char *out, size_t out_size) {
+  char key_hex[65];
+  static const char hex[] = "0123456789abcdef";
+  for (size_t index = 0; index < 32; index++) {
+    key_hex[index * 2] = hex[(public_key[index] >> 4) & 0x0F];
+    key_hex[index * 2 + 1] = hex[public_key[index] & 0x0F];
+  }
+  key_hex[64] = '\0';
+  snprintf(out, out_size, "%.16s", key_hex);
+}
+
+static void update_identity_debug(ts_ctrl_t *ctrl, const char *identity_status) {
+  snprintf(ctrl->identity_status, sizeof(ctrl->identity_status), "%s", identity_status != nullptr ? identity_status : "unknown");
+  set_key_id(ctrl->machine_key_public, ctrl->machine_key_id, sizeof(ctrl->machine_key_id));
+  set_key_id(ctrl->node_key_public, ctrl->node_key_id, sizeof(ctrl->node_key_id));
+  ESP_LOGI(TAG, "tailscale identity %s machine=%s node=%s", ctrl->identity_status, ctrl->machine_key_id,
+           ctrl->node_key_id);
+}
+
+static void copy_preview(char *dest, size_t dest_size, const char *src, size_t src_len) {
+  if (dest_size == 0) return;
+  dest[0] = '\0';
+  if (src == nullptr || src_len == 0) return;
+
+  static const char hex[] = "0123456789ABCDEF";
+  size_t out = 0;
+  size_t limit = src_len < 96 ? src_len : 96;
+  for (size_t index = 0; index < limit && out + 1 < dest_size; index++) {
+    unsigned char ch = (unsigned char) src[index];
+    if (ch >= 0x20 && ch <= 0x7E && ch != '\\') {
+      dest[out++] = (char) ch;
+      continue;
+    }
+    if (out + 4 >= dest_size) break;
+    dest[out++] = '\\';
+    dest[out++] = 'x';
+    dest[out++] = hex[(ch >> 4) & 0x0F];
+    dest[out++] = hex[ch & 0x0F];
+  }
+  dest[out] = '\0';
+}
+
+static const char *extract_map_json_payload(char *buffer, size_t *buffer_len) {
+  if (buffer == nullptr || buffer_len == nullptr || *buffer_len == 0) return buffer;
+  if (*buffer_len >= 4) {
+    uint32_t msg_len = ((uint32_t) (uint8_t) buffer[0]) | (((uint32_t) (uint8_t) buffer[1]) << 8) |
+                       (((uint32_t) (uint8_t) buffer[2]) << 16) | (((uint32_t) (uint8_t) buffer[3]) << 24);
+    if (msg_len > 0 && msg_len <= *buffer_len - 4 && buffer[4] == '{') {
+      memmove(buffer, buffer + 4, msg_len);
+      *buffer_len = msg_len;
+      buffer[msg_len] = '\0';
+      return buffer;
+    }
+  }
+  return buffer;
+}
+
+static bool load_persisted_identity(ts_ctrl_t *ctrl, char *source_out, size_t source_out_size) {
+  const char *reason = nullptr;
+  if (esphome::global_preferences == nullptr) {
+    snprintf(source_out, source_out_size, "%s", "no_prefs");
+    ESP_LOGW(TAG, "global_preferences unavailable, cannot load tailscale identity");
+    return false;
+  }
+
+  const uint32_t pref_hash = esphome::fnv1a_hash(IDENTITY_PREF_KEY);
+  auto pref = esphome::global_preferences->make_preference<saved_identity_t>(pref_hash, true);
+  saved_identity_t saved{};
+  if (!pref.load(&saved)) {
+    snprintf(source_out, source_out_size, "%s", "no_blob");
+    ESP_LOGW(TAG, "tailscale identity not found in NVS (hash=%" PRIu32 ")", pref_hash);
+    return false;
+  }
+
+  if (!is_saved_identity_valid(saved, &reason)) {
+    snprintf(source_out, source_out_size, "%s", reason != nullptr ? reason : "invalid");
+    ESP_LOGW(TAG, "tailscale identity in NVS is invalid (%s, hash=%" PRIu32 ")", reason != nullptr ? reason : "invalid",
+             pref_hash);
+    return false;
+  }
+
+  apply_saved_identity(ctrl, saved);
+  snprintf(source_out, source_out_size, "%s", "nvs");
+  ESP_LOGI(TAG, "loaded tailscale identity from NVS (hash=%" PRIu32 ")", pref_hash);
+  return true;
+}
+
+static void save_persisted_identity(ts_ctrl_t *ctrl, char *result_out, size_t result_out_size) {
+  saved_identity_t saved{};
+  saved.magic = IDENTITY_PREF_MAGIC;
+  memcpy(saved.machine_key_private, ctrl->machine_key_private, sizeof(saved.machine_key_private));
+  memcpy(saved.node_key_private, ctrl->node_key_private, sizeof(saved.node_key_private));
+  memcpy(saved.disco_key_private, ctrl->disco_key_private, sizeof(saved.disco_key_private));
+
+  if (esphome::global_preferences == nullptr) {
+    snprintf(result_out, result_out_size, "%s", "no_prefs");
+    ESP_LOGW(TAG, "global_preferences unavailable, cannot persist tailscale identity");
+    return;
+  }
+
+  const uint32_t pref_hash = esphome::fnv1a_hash(IDENTITY_PREF_KEY);
+  auto pref = esphome::global_preferences->make_preference<saved_identity_t>(pref_hash, true);
+  if (!pref.save(&saved)) {
+    snprintf(result_out, result_out_size, "%s", "save_fail");
+    ESP_LOGW(TAG, "failed to queue persisted tailscale identity save (hash=%" PRIu32 ")", pref_hash);
+    return;
+  }
+  if (!esphome::global_preferences->sync()) {
+    snprintf(result_out, result_out_size, "%s", "sync_fail");
+    ESP_LOGW(TAG, "failed to sync persisted tailscale identity (hash=%" PRIu32 ")", pref_hash);
+    return;
+  }
+  snprintf(result_out, result_out_size, "%s", "nvs_saved");
+  ESP_LOGI(TAG, "persisted tailscale identity to NVS (hash=%" PRIu32 ")", pref_hash);
+}
 
 static void set_socket_timeout(int sock, int timeout_ms) {
   if (sock < 0 || timeout_ms < 0) return;
@@ -183,11 +352,23 @@ static void json_escape(char *out, size_t out_size, const char *input) {
 
 static void build_hostinfo(ts_ctrl_t *ctrl) {
   char escaped_name[128];
+  char services_part[160] = "";
+  char ingress_part[64] = "";
   json_escape(escaped_name, sizeof(escaped_name), ctrl->machine_name);
+  if (ctrl->advertised_service_port != 0) {
+    snprintf(services_part, sizeof(services_part),
+             ",\"Services\":[{\"Proto\":\"tcp\",\"Port\":%u,\"Description\":\"esphome-web\"}]",
+             (unsigned) ctrl->advertised_service_port);
+  }
+  if (ctrl->ingress_enabled) {
+    snprintf(ingress_part, sizeof(ingress_part), ",\"IngressEnabled\":true");
+  } else if (ctrl->wire_ingress) {
+    snprintf(ingress_part, sizeof(ingress_part), ",\"WireIngress\":true");
+  }
   snprintf(ctrl->hostinfo, sizeof(ctrl->hostinfo),
            "{\"Hostname\":\"%s\",\"OS\":\"linux\",\"OSVersion\":\"ESP-IDF\",\"GoArch\":\"arm\","
-           "\"NetInfo\":{\"PreferredDERP\":%u}}",
-           escaped_name, (unsigned) DEFAULT_DERP_REGION);
+           "\"Userspace\":true%s%s,\"NetInfo\":{\"PreferredDERP\":%u}}",
+           escaped_name, ingress_part, services_part, (unsigned) DEFAULT_DERP_REGION);
 }
 
 static void build_node_key_string(const uint8_t *public_key, char *out, size_t out_size) {
@@ -257,6 +438,24 @@ static bool json_extract_first_array_string(const char *json, const char *key, c
   return true;
 }
 
+static bool json_extract_string_value(const char *json, const char *key, char *out, size_t out_size) {
+  const char *key_pos = strstr(json, key);
+  if (key_pos == nullptr) return false;
+  const char *colon = strchr(key_pos, ':');
+  if (colon == nullptr) return false;
+  const char *value_start = strchr(colon, '"');
+  if (value_start == nullptr) return false;
+  value_start++;
+  const char *value_end = strchr(value_start, '"');
+  if (value_end == nullptr || value_end <= value_start) return false;
+
+  size_t copy_len = (size_t) (value_end - value_start);
+  if (copy_len >= out_size) copy_len = out_size - 1;
+  memcpy(out, value_start, copy_len);
+  out[copy_len] = '\0';
+  return true;
+}
+
 static int json_count_array_objects(const char *json, const char *key) {
   const char *key_pos = strstr(json, key);
   if (key_pos == nullptr) return -1;
@@ -310,11 +509,16 @@ static int json_count_array_objects(const char *json, const char *key) {
 }
 
 static void update_diagnostics_from_json(ts_ctrl_t *ctrl, const char *json, bool replace_peer_count) {
-  const char *node_pos = strstr(json, "\"Node\"");
-  const char *address_scope = node_pos != nullptr ? node_pos : json;
   char address[64];
-  if (json_extract_first_array_string(address_scope, "\"Addresses\"", address, sizeof(address))) {
-    trim_cidr_suffix(address);
+  const char *node_pos = strstr(json, "\"Node\"");
+  if (node_pos != nullptr) {
+    if (json_extract_first_array_string(node_pos, "\"Addresses\"", address, sizeof(address))) {
+      trim_cidr_suffix(address);
+      if (address[0] != '\0') {
+        snprintf(ctrl->vpn_ip, sizeof(ctrl->vpn_ip), "%s", address);
+      }
+    }
+  } else if (json_extract_string_value(json, "\"SelfNodeV4MasqAddrForThisPeer\"", address, sizeof(address))) {
     if (address[0] != '\0') {
       snprintf(ctrl->vpn_ip, sizeof(ctrl->vpn_ip), "%s", address);
     }
@@ -455,7 +659,7 @@ static esp_err_t h2_recv_frame(ts_ctrl_t *ctrl, uint8_t *frame_buf, size_t frame
     int received = noise_recv_plain(ctrl, ctrl->h2_pending + ctrl->h2_pending_len,
                                     sizeof(ctrl->h2_pending) - ctrl->h2_pending_len, timeout_ms);
     if (received < 0) {
-      ESP_LOGE(TAG, "failed to read Noise transport payload while waiting for H2 frame");
+      ESP_LOGD(TAG, "no Noise transport payload available for H2 frame within timeout");
       return ESP_ERR_TIMEOUT;
     }
     ctrl->h2_pending_len += (size_t) received;
@@ -502,8 +706,10 @@ static esp_err_t send_h2_request(ts_ctrl_t *ctrl, uint32_t stream_id, const char
 
   int pos = 0;
   int frame_len = h2_build_headers_frame(h2_buf + pos, h2_cap - pos, "POST", path, H2_SCHEME, SERVER_HOST,
-                                         "application/json", stream_id, 0);
+                                         "application/json", nullptr, nullptr, stream_id, 0);
   if (frame_len < 0) {
+    ESP_LOGE(TAG, "failed to build H2 headers for %s stream=%u body_len=%u", path, (unsigned) stream_id,
+             (unsigned) body_len);
     free(h2_buf);
     return ESP_FAIL;
   }
@@ -512,12 +718,18 @@ static esp_err_t send_h2_request(ts_ctrl_t *ctrl, uint32_t stream_id, const char
   frame_len = h2_build_data_frame(h2_buf + pos, h2_cap - pos, (const uint8_t *) body, (uint32_t) body_len, stream_id,
                                   1);
   if (frame_len < 0) {
+    ESP_LOGE(TAG, "failed to build H2 data for %s stream=%u body_len=%u", path, (unsigned) stream_id,
+             (unsigned) body_len);
     free(h2_buf);
     return ESP_FAIL;
   }
   pos += frame_len;
 
   esp_err_t status = noise_send(ctrl, h2_buf, (size_t) pos);
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "failed to send H2 request for %s stream=%u status=%d body_len=%u", path, (unsigned) stream_id,
+             (int) status, (unsigned) body_len);
+  }
   free(h2_buf);
   return status;
 }
@@ -617,8 +829,8 @@ static esp_err_t build_map_body(ts_ctrl_t *ctrl, char *body, size_t body_size, b
   build_disco_key_string(ctrl->disco_key_public, disco_key, sizeof(disco_key));
 
   int written = snprintf(body, body_size,
-                         "{\"Version\":%d,\"NodeKey\":\"%s\",\"DiscoKey\":\"%s\",\"Hostinfo\":%s,\"Stream\":%s,"
-                         "\"KeepAlive\":true,\"Compress\":\"\",\"OmitPeers\":%s}",
+                         "{\"Version\":%d,\"KeepAlive\":true,\"NodeKey\":\"%s\",\"DiscoKey\":\"%s\","
+                         "\"Hostinfo\":%s,\"Stream\":%s,\"Compress\":\"\",\"OmitPeers\":%s}",
                          NOISE_PROTOCOL_VER, node_key, disco_key, ctrl->hostinfo, streaming ? "true" : "false",
                          omit_peers ? "true" : "false");
   return (written > 0 && (size_t) written < body_size) ? ESP_OK : ESP_ERR_INVALID_SIZE;
@@ -654,7 +866,8 @@ static esp_err_t send_h2_preface(ts_ctrl_t *ctrl) {
 
 }  // namespace
 
-esp_err_t ts_ctrl_init(ts_ctrl_t *ctrl, const char *auth_key, const char *hostname) {
+esp_err_t ts_ctrl_init(ts_ctrl_t *ctrl, const char *auth_key, const char *hostname, bool wire_ingress,
+                       bool ingress_enabled, uint16_t advertised_service_port) {
   memset(ctrl, 0, sizeof(*ctrl));
   ctrl->sock = -1;
   ctrl->tls_active = false;
@@ -664,9 +877,18 @@ esp_err_t ts_ctrl_init(ts_ctrl_t *ctrl, const char *auth_key, const char *hostna
   mbedtls_ctr_drbg_init(&ctrl->ctr_drbg);
   ctrl->stream_map_once = 3;
   ctrl->stream_map_live = 5;
+  ctrl->identity_loaded_from_storage = false;
+  ctrl->wire_ingress = wire_ingress;
+  ctrl->ingress_enabled = ingress_enabled;
+  ctrl->advertised_service_port = advertised_service_port;
   snprintf(ctrl->auth_key, sizeof(ctrl->auth_key), "%s", auth_key != nullptr ? auth_key : "");
   snprintf(ctrl->machine_name, sizeof(ctrl->machine_name), "%s", hostname != nullptr ? hostname : "");
   snprintf(ctrl->vpn_ip, sizeof(ctrl->vpn_ip), "0.0.0.0");
+  snprintf(ctrl->identity_status, sizeof(ctrl->identity_status), "%s", "unknown");
+  ctrl->machine_key_id[0] = '\0';
+  ctrl->node_key_id[0] = '\0';
+  ctrl->last_register_preview[0] = '\0';
+  ctrl->last_map_preview[0] = '\0';
   build_hostinfo(ctrl);
   return ESP_OK;
 }
@@ -742,12 +964,24 @@ esp_err_t ts_ctrl_connect(ts_ctrl_t *ctrl) {
 
 esp_err_t ts_ctrl_handshake(ts_ctrl_t *ctrl) {
   ESP_LOGI(TAG, "starting tailscale control handshake");
-  esp_fill_random(ctrl->machine_key_private, sizeof(ctrl->machine_key_private));
-  esp_fill_random(ctrl->node_key_private, sizeof(ctrl->node_key_private));
-  esp_fill_random(ctrl->disco_key_private, sizeof(ctrl->disco_key_private));
-  noise_ik_generate_keypair(ctrl->machine_key_private, ctrl->machine_key_public);
-  noise_ik_generate_keypair(ctrl->node_key_private, ctrl->node_key_public);
-  noise_ik_generate_keypair(ctrl->disco_key_private, ctrl->disco_key_public);
+  char identity_source[32];
+  if (load_persisted_identity(ctrl, identity_source, sizeof(identity_source))) {
+    ctrl->identity_loaded_from_storage = true;
+    char identity_status[64];
+    snprintf(identity_status, sizeof(identity_status), "loaded_%s", identity_source);
+    update_identity_debug(ctrl, identity_status);
+  } else {
+    ctrl->identity_loaded_from_storage = false;
+    esp_fill_random(ctrl->machine_key_private, sizeof(ctrl->machine_key_private));
+    esp_fill_random(ctrl->node_key_private, sizeof(ctrl->node_key_private));
+    esp_fill_random(ctrl->disco_key_private, sizeof(ctrl->disco_key_private));
+    derive_public_keys(ctrl);
+    char save_result[32];
+    save_persisted_identity(ctrl, save_result, sizeof(save_result));
+    char identity_status[64];
+    snprintf(identity_status, sizeof(identity_status), "generated_%s_%s", identity_source, save_result);
+    update_identity_debug(ctrl, identity_status);
+  }
   noise_ik_init(&ctrl->noise, ctrl->machine_key_private, ctrl->machine_key_public);
 
   uint8_t msg1[160];
@@ -919,7 +1153,19 @@ esp_err_t ts_ctrl_register(ts_ctrl_t *ctrl) {
   }
 
   if (response_len > 0) {
+    copy_preview(ctrl->last_register_preview, sizeof(ctrl->last_register_preview), response, response_len);
     update_diagnostics_from_json(ctrl, response, false);
+    bool has_auth_url = strstr(response, "\"AuthURL\":\"") != nullptr;
+    bool machine_authorized = strstr(response, "\"MachineAuthorized\":true") != nullptr;
+    bool node_key_expired = strstr(response, "\"NodeKeyExpired\":true") != nullptr;
+    bool has_error = strstr(response, "\"Error\":\"") != nullptr;
+    ESP_LOGE(TAG,
+             "/machine/register response bytes=%u vpn_ip=%s auth_url=%d machine_authorized=%d node_key_expired=%d error=%d",
+             (unsigned) response_len, ctrl->vpn_ip, has_auth_url, machine_authorized, node_key_expired, has_error);
+    if (has_error) {
+      const char *error_pos = strstr(response, "\"Error\":\"");
+      ESP_LOGW(TAG, "/machine/register error snippet=%.160s", error_pos != nullptr ? error_pos : response);
+    }
   }
   return ESP_OK;
 }
@@ -927,16 +1173,33 @@ esp_err_t ts_ctrl_register(ts_ctrl_t *ctrl) {
 esp_err_t ts_ctrl_fetch_map(ts_ctrl_t *ctrl) {
   char body[1536];
   if (build_map_body(ctrl, body, sizeof(body), false, false) != ESP_OK) return ESP_FAIL;
-  if (send_h2_request(ctrl, ctrl->stream_map_once, "/machine/map", body) != ESP_OK) return ESP_FAIL;
+  ESP_LOGE(TAG, "requesting one-shot /machine/map stream=%u", (unsigned) ctrl->stream_map_once);
+  if (send_h2_request(ctrl, ctrl->stream_map_once, "/machine/map", body) != ESP_OK) {
+    ESP_LOGE(TAG, "one-shot /machine/map send failed");
+    return ESP_FAIL;
+  }
 
   char *response = (char *) malloc(TSC_RESP_MAX + 1);
-  if (response == nullptr) return ESP_ERR_NO_MEM;
+  if (response == nullptr) {
+    ESP_LOGE(TAG, "failed to allocate map response buffer (%u bytes)", (unsigned) (TSC_RESP_MAX + 1));
+    return ESP_ERR_NO_MEM;
+  }
   response[0] = '\0';
 
   size_t response_len = 0;
+  ESP_LOGE(TAG, "waiting for one-shot /machine/map response");
   esp_err_t status = read_h2_response(ctrl, ctrl->stream_map_once, response, TSC_RESP_MAX + 1, &response_len, 15000);
   if (status == ESP_OK && response_len > 0) {
-    update_diagnostics_from_json(ctrl, response, true);
+    const char *payload = extract_map_json_payload(response, &response_len);
+    copy_preview(ctrl->last_map_preview, sizeof(ctrl->last_map_preview), payload, response_len);
+    update_diagnostics_from_json(ctrl, payload, true);
+    ESP_LOGI(TAG, "/machine/map response bytes=%u vpn_ip=%s peers=%d", (unsigned) response_len, ctrl->vpn_ip,
+             ctrl->peer_count);
+    ESP_LOGI(TAG, "/machine/map snippet=%.320s", payload);
+  } else if (status != ESP_OK) {
+    copy_preview(ctrl->last_map_preview, sizeof(ctrl->last_map_preview), response, response_len);
+    ESP_LOGE(TAG, "/machine/map failed status=%d bytes=%u partial=%.200s", (int) status, (unsigned) response_len,
+             response);
   }
 
   free(response);
@@ -946,6 +1209,7 @@ esp_err_t ts_ctrl_fetch_map(ts_ctrl_t *ctrl) {
 esp_err_t ts_ctrl_start_stream(ts_ctrl_t *ctrl) {
   char body[1536];
   if (build_map_body(ctrl, body, sizeof(body), true, true) != ESP_OK) return ESP_FAIL;
+  ESP_LOGE(TAG, "requesting streaming /machine/map stream=%u", (unsigned) ctrl->stream_map_live);
   return send_h2_request(ctrl, ctrl->stream_map_live, "/machine/map", body);
 }
 

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 CorCorMS (https://github.com/CorCorMS)
-// SPDX-License-Identifier: LicenseRef-NonCommercial
+// SPDX-License-Identifier: Apache-2.0
 //
 // See LICENSE for full license text.
 // Third-party code in this directory may have separate licensing.

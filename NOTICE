@@ -1,0 +1,17 @@
+ESP32 Tailscale COR
+Copyright (c) 2025 CorCorMS
+
+This repository distributes its original project code under Apache License 2.0.
+
+Third-party code included in this repository keeps its own original licensing:
+
+- x25519.c / x25519.h
+  Copyright (c) 2015-2016 Cryptography Research, Inc.
+  Distributed under the MIT License.
+
+- blake2s.cpp / blake2s.h
+  Based on the RFC 7693 BLAKE2 reference description.
+  Public-domain-compatible reference basis / IETF publication context.
+
+Tailscale is a trademark of Tailscale Inc.
+This repository is an independent implementation and is not affiliated with Tailscale Inc.

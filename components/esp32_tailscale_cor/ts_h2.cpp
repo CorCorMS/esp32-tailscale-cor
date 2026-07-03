@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 CorCorMS (https://github.com/CorCorMS)
-// SPDX-License-Identifier: LicenseRef-NonCommercial
+// SPDX-License-Identifier: Apache-2.0
 //
 // See LICENSE for full license text.
 // Third-party code in this directory may have separate licensing.
@@ -42,6 +42,19 @@ static int hpack_literal_indexed(uint8_t *out, size_t out_size, uint8_t name_ind
   return (int) (value_len + 2);
 }
 
+static int hpack_literal_newname(uint8_t *out, size_t out_size, const char *name, const char *value) {
+  size_t name_len = strlen(name);
+  size_t value_len = strlen(value);
+  if (name_len > 127 || value_len > 127) return -1;
+  if (out_size < name_len + value_len + 3) return -1;
+  out[0] = 0x40;
+  out[1] = (uint8_t) name_len;
+  memcpy(out + 2, name, name_len);
+  out[2 + name_len] = (uint8_t) value_len;
+  memcpy(out + 3 + name_len, value, value_len);
+  return (int) (name_len + value_len + 3);
+}
+
 }  // namespace
 
 int h2_build_preface(uint8_t *out, size_t out_size) {
@@ -68,7 +81,8 @@ int h2_build_settings_ack(uint8_t *out, size_t out_size) {
 }
 
 int h2_build_headers_frame(uint8_t *out, size_t out_size, const char *method, const char *path, const char *scheme,
-                           const char *authority, const char *content_type, uint32_t stream_id, int end_stream) {
+                           const char *authority, const char *content_type, const char *extra_header_name,
+                           const char *extra_header_value, uint32_t stream_id, int end_stream) {
   uint8_t hpack[256];
   int hpack_len = 0;
   int written = 0;
@@ -109,6 +123,12 @@ int h2_build_headers_frame(uint8_t *out, size_t out_size, const char *method, co
 
   if (content_type && content_type[0]) {
     written = hpack_literal_indexed(hpack + hpack_len, sizeof(hpack) - hpack_len, 31, content_type);
+    if (written < 0) return -1;
+    hpack_len += written;
+  }
+
+  if (extra_header_name && extra_header_name[0] && extra_header_value && extra_header_value[0]) {
+    written = hpack_literal_newname(hpack + hpack_len, sizeof(hpack) - hpack_len, extra_header_name, extra_header_value);
     if (written < 0) return -1;
     hpack_len += written;
   }

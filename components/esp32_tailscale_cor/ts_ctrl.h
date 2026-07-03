@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025 CorCorMS (https://github.com/CorCorMS)
-// SPDX-License-Identifier: LicenseRef-NonCommercial
+// SPDX-License-Identifier: Apache-2.0
 //
 // See LICENSE for full license text.
 // Third-party code in this directory may have separate licensing.
@@ -34,10 +34,19 @@ typedef struct {
     uint8_t disco_key_public[32];
     uint8_t node_key_challenge[32];
     bool has_node_key_challenge;
+    bool identity_loaded_from_storage;
+    bool wire_ingress;
+    bool ingress_enabled;
     char auth_key[128];
     char machine_name[64];
-    char hostinfo[256];
+    char hostinfo[512];
     char vpn_ip[64];
+    char identity_status[64];
+    char machine_key_id[24];
+    char node_key_id[24];
+    char last_register_preview[256];
+    char last_map_preview[384];
+    uint16_t advertised_service_port;
     int peer_count;
     uint8_t h2_pending[32 * 1024];
     size_t h2_pending_len;
@@ -46,7 +55,8 @@ typedef struct {
     uint32_t stream_map_live;
 } ts_ctrl_t;
 
-esp_err_t ts_ctrl_init(ts_ctrl_t *c, const char *auth_key, const char *hostname);
+esp_err_t ts_ctrl_init(ts_ctrl_t *c, const char *auth_key, const char *hostname, bool wire_ingress,
+                       bool ingress_enabled, uint16_t advertised_service_port);
 esp_err_t ts_ctrl_connect(ts_ctrl_t *c);
 esp_err_t ts_ctrl_handshake(ts_ctrl_t *c);
 esp_err_t ts_ctrl_register(ts_ctrl_t *c);
