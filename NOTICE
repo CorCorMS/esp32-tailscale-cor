@@ -1,9 +1,13 @@
 ESP32 Tailscale COR
-Copyright (c) 2025 CorCorMS
+Required Notice: Copyright (c) 2025 CorCorMS
 
-This repository distributes its original project code under Apache License 2.0.
+This repository distributes its original project code under the
+PolyForm Noncommercial License 1.0.0.
 
-Third-party code included in this repository keeps its own original licensing:
+Commercial use of the original project code is not permitted under that license.
+
+Third-party code included in this repository keeps its own original licensing and
+is not relicensed by CorCorMS:
 
 - x25519.c / x25519.h
   Copyright (c) 2015-2016 Cryptography Research, Inc.

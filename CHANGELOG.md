@@ -17,6 +17,7 @@ All notable changes to the standalone ESP-IDF line are documented in this file.
 - moved the Tailscale protocol implementation into a repository layout suitable for standalone ESP-IDF builds
 - replaced the previous ESPHome-specific service description with a generic advertised service description
 - documented the repository split between `general` and `esphome`
+- set the original project code license to PolyForm Noncommercial 1.0.0 so commercial use remains disallowed
 
 ### Removed
 

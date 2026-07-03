@@ -1,6 +1,6 @@
 # ESP32 Tailscale COR
 
-[![License](https://img.shields.io/github/license/CorCorMS/esp32-tailscale-cor)](https://github.com/CorCorMS/esp32-tailscale-cor/blob/general/LICENSE)
+[![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-red)](https://github.com/CorCorMS/esp32-tailscale-cor/blob/general/LICENSE)
 
 This branch is the standalone ESP-IDF edition of ESP32 Tailscale COR.
 
@@ -116,7 +116,10 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Project code in this branch is distributed under Apache License 2.0.
+The original project code in this branch is source-available under the
+PolyForm Noncommercial License 1.0.0.
+
+Commercial use of that original project code is not permitted under this license.
 
 See:
 
