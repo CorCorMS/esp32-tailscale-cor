@@ -9,7 +9,7 @@ All notable changes to this project are documented in this file.
 - promoted the current working ESP32 Tailscale component into the public release repository
 - kept the release scope focused on the ESPHome Tailscale component only, without bundling any local web server setup
 - refreshed the repository presentation and documentation to match the cleaner release style used in `ha-energy-native`
-- changed the project code license from the previous non-commercial custom license to Apache License 2.0
+- set the original project code license to PolyForm Noncommercial 1.0.0 so commercial use remains disallowed
 
 ### Added
 
