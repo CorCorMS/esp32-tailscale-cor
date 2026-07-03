@@ -14,10 +14,11 @@ It implements the Tailscale control-plane flow on the ESP32 itself:
 - live network-map stream updates
 - diagnostic sensors for connection and identity state
 
-## What `v1.0.1` includes
+## What `v1.0.3` includes
 
 - the current working Tailscale component without any bundled local web UI
 - the validated control-stream fixes used in the latest real-device HA deployment
+- a receive-timeout handling fix for ESP32-S2 control-plane TLS reads to avoid repeated socket timeout corruption
 - identity persistence and identity diagnostics for reconnect visibility
 - optional ingress advertisement fields for YAML-driven Serve/Funnel setups
 
@@ -47,7 +48,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/CorCorMS/esp32-tailscale-cor
-      ref: v1.0.1
+      ref: v1.0.3
       path: components
     components: [esp32_tailscale_cor]
 ```

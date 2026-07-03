@@ -207,14 +207,20 @@ static void save_persisted_identity(ts_ctrl_t *ctrl, char *result_out, size_t re
   ESP_LOGI(TAG, "persisted tailscale identity to NVS (hash=%" PRIu32 ")", pref_hash);
 }
 
-static void set_socket_timeout(int sock, int timeout_ms) {
+static void set_socket_timeout(ts_ctrl_t *ctrl, int sock, int timeout_ms) {
   if (sock < 0 || timeout_ms < 0) return;
+  if (ctrl != nullptr && ctrl->socket_rcv_timeout_ms == timeout_ms) return;
   struct timeval tv = {.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+    ESP_LOGW(TAG, "setsockopt(SO_RCVTIMEO=%d) failed errno=%d", timeout_ms, errno);
+    return;
+  }
+  if (ctrl != nullptr) ctrl->socket_rcv_timeout_ms = timeout_ms;
 }
 
 static int tls_bio_send(void *ctx, const unsigned char *buf, size_t len) {
-  int sock = *(int *) ctx;
+  auto *ctrl = static_cast<ts_ctrl_t *>(ctx);
+  int sock = ctrl->sock;
   int written = write(sock, buf, len);
   if (written >= 0) return written;
   if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return MBEDTLS_ERR_SSL_WANT_WRITE;
@@ -223,8 +229,9 @@ static int tls_bio_send(void *ctx, const unsigned char *buf, size_t len) {
 }
 
 static int tls_bio_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t timeout_ms) {
-  int sock = *(int *) ctx;
-  set_socket_timeout(sock, timeout_ms > 0 ? (int) timeout_ms : 5000);
+  auto *ctrl = static_cast<ts_ctrl_t *>(ctx);
+  int sock = ctrl->sock;
+  set_socket_timeout(ctrl, sock, timeout_ms > 0 ? (int) timeout_ms : 5000);
   int received = read(sock, buf, len);
   if (received >= 0) return received;
   if (errno == EAGAIN || errno == EWOULDBLOCK) return MBEDTLS_ERR_SSL_TIMEOUT;
@@ -269,7 +276,7 @@ static esp_err_t read_all(ts_ctrl_t *ctrl, uint8_t *data, size_t len, int timeou
         continue;
       }
     } else {
-      set_socket_timeout(ctrl->sock, timeout_ms);
+      set_socket_timeout(ctrl, ctrl->sock, timeout_ms);
       received = read(ctrl->sock, data, len);
     }
     if (received <= 0) {
@@ -295,7 +302,7 @@ static int recv_some(ts_ctrl_t *ctrl, uint8_t *data, size_t len, int timeout_ms)
       return received;
     }
   }
-  set_socket_timeout(ctrl->sock, timeout_ms);
+  set_socket_timeout(ctrl, ctrl->sock, timeout_ms);
   return read(ctrl->sock, data, len);
 }
 
@@ -870,6 +877,7 @@ esp_err_t ts_ctrl_init(ts_ctrl_t *ctrl, const char *auth_key, const char *hostna
                        bool ingress_enabled, uint16_t advertised_service_port) {
   memset(ctrl, 0, sizeof(*ctrl));
   ctrl->sock = -1;
+  ctrl->socket_rcv_timeout_ms = -1;
   ctrl->tls_active = false;
   mbedtls_ssl_init(&ctrl->ssl);
   mbedtls_ssl_config_init(&ctrl->ssl_conf);
@@ -918,6 +926,8 @@ esp_err_t ts_ctrl_connect(ts_ctrl_t *ctrl) {
     return ESP_FAIL;
   }
 
+  set_socket_timeout(ctrl, ctrl->sock, 5000);
+
   if (mbedtls_ctr_drbg_seed(&ctrl->ctr_drbg, mbedtls_entropy_func, &ctrl->entropy, nullptr, 0) != 0) {
     ESP_LOGE(TAG, "TLS RNG seed failed");
     ts_ctrl_close(ctrl);
@@ -944,7 +954,7 @@ esp_err_t ts_ctrl_connect(ts_ctrl_t *ctrl) {
     return ESP_FAIL;
   }
 
-  mbedtls_ssl_set_bio(&ctrl->ssl, &ctrl->sock, tls_bio_send, nullptr, tls_bio_recv_timeout);
+  mbedtls_ssl_set_bio(&ctrl->ssl, ctrl, tls_bio_send, nullptr, tls_bio_recv_timeout);
   while (true) {
     int ret = mbedtls_ssl_handshake(&ctrl->ssl);
     if (ret == 0) break;
@@ -1273,6 +1283,7 @@ void ts_ctrl_close(ts_ctrl_t *ctrl) {
   mbedtls_ctr_drbg_init(&ctrl->ctr_drbg);
   mbedtls_entropy_init(&ctrl->entropy);
   ctrl->tls_active = false;
+  ctrl->socket_rcv_timeout_ms = -1;
   if (ctrl->sock >= 0) {
     close(ctrl->sock);
     ctrl->sock = -1;

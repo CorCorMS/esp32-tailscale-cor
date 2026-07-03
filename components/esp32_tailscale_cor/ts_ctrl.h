@@ -20,6 +20,7 @@ extern "C" {
 
 typedef struct {
     int sock;
+    int socket_rcv_timeout_ms;
     bool tls_active;
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config ssl_conf;

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.0.3 - 2026-07-03
+
+### Fixed
+
+- corrected the TLS BIO socket context so ESP32-S2 control-plane reads always operate on the live `ts_ctrl_t` socket instead of a stale integer pointer
+- cached and guarded `SO_RCVTIMEO` updates to avoid repeated timeout reconfiguration during TLS reads
+- initialized and reset the tracked socket receive-timeout state during connect and close paths for safer reconnect behavior
+
 ## v1.0.1 - 2026-07-03
 
 ### Changed
