@@ -14,10 +14,9 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
+#include "nvs.h"
 #include "noise_ik.h"
 #include "ts_h2.h"
-#include "esphome/core/helpers.h"
-#include "esphome/core/preferences.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -39,7 +38,8 @@ static constexpr uint16_t SERVER_PORT = 443;
 static constexpr const char *H2_SCHEME = "https";
 static constexpr uint16_t DEFAULT_DERP_REGION = 9;
 static constexpr uint32_t IDENTITY_PREF_MAGIC = 0x54534331UL;
-static constexpr const char *IDENTITY_PREF_KEY = "esp32_tailscale_cor.identity";
+static constexpr const char *IDENTITY_PREF_NAMESPACE = "ts_cor";
+static constexpr const char *IDENTITY_PREF_KEY = "identity_v1";
 
 struct saved_identity_t {
   uint32_t magic;
@@ -150,31 +150,48 @@ static const char *extract_map_json_payload(char *buffer, size_t *buffer_len) {
 
 static bool load_persisted_identity(ts_ctrl_t *ctrl, char *source_out, size_t source_out_size) {
   const char *reason = nullptr;
-  if (esphome::global_preferences == nullptr) {
-    snprintf(source_out, source_out_size, "%s", "no_prefs");
-    ESP_LOGW(TAG, "global_preferences unavailable, cannot load tailscale identity");
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(IDENTITY_PREF_NAMESPACE, NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    snprintf(source_out, source_out_size, "%s", "no_ns");
+    ESP_LOGW(TAG, "tailscale identity namespace not found");
+    return false;
+  }
+  if (err != ESP_OK) {
+    snprintf(source_out, source_out_size, "%s", "nvs_open_fail");
+    ESP_LOGW(TAG, "failed to open tailscale identity namespace (%s)", esp_err_to_name(err));
     return false;
   }
 
-  const uint32_t pref_hash = esphome::fnv1a_hash(IDENTITY_PREF_KEY);
-  auto pref = esphome::global_preferences->make_preference<saved_identity_t>(pref_hash, true);
   saved_identity_t saved{};
-  if (!pref.load(&saved)) {
+  size_t blob_size = sizeof(saved);
+  err = nvs_get_blob(handle, IDENTITY_PREF_KEY, &saved, &blob_size);
+  nvs_close(handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
     snprintf(source_out, source_out_size, "%s", "no_blob");
-    ESP_LOGW(TAG, "tailscale identity not found in NVS (hash=%" PRIu32 ")", pref_hash);
+    ESP_LOGW(TAG, "tailscale identity blob not found");
+    return false;
+  }
+  if (err != ESP_OK) {
+    snprintf(source_out, source_out_size, "%s", "load_fail");
+    ESP_LOGW(TAG, "failed to load tailscale identity blob (%s)", esp_err_to_name(err));
+    return false;
+  }
+  if (blob_size != sizeof(saved)) {
+    snprintf(source_out, source_out_size, "%s", "bad_size");
+    ESP_LOGW(TAG, "tailscale identity blob has unexpected size (%u)", (unsigned) blob_size);
     return false;
   }
 
   if (!is_saved_identity_valid(saved, &reason)) {
     snprintf(source_out, source_out_size, "%s", reason != nullptr ? reason : "invalid");
-    ESP_LOGW(TAG, "tailscale identity in NVS is invalid (%s, hash=%" PRIu32 ")", reason != nullptr ? reason : "invalid",
-             pref_hash);
+    ESP_LOGW(TAG, "tailscale identity in NVS is invalid (%s)", reason != nullptr ? reason : "invalid");
     return false;
   }
 
   apply_saved_identity(ctrl, saved);
   snprintf(source_out, source_out_size, "%s", "nvs");
-  ESP_LOGI(TAG, "loaded tailscale identity from NVS (hash=%" PRIu32 ")", pref_hash);
+  ESP_LOGI(TAG, "loaded tailscale identity from NVS");
   return true;
 }
 
@@ -185,26 +202,31 @@ static void save_persisted_identity(ts_ctrl_t *ctrl, char *result_out, size_t re
   memcpy(saved.node_key_private, ctrl->node_key_private, sizeof(saved.node_key_private));
   memcpy(saved.disco_key_private, ctrl->disco_key_private, sizeof(saved.disco_key_private));
 
-  if (esphome::global_preferences == nullptr) {
-    snprintf(result_out, result_out_size, "%s", "no_prefs");
-    ESP_LOGW(TAG, "global_preferences unavailable, cannot persist tailscale identity");
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open(IDENTITY_PREF_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    snprintf(result_out, result_out_size, "%s", "nvs_open_fail");
+    ESP_LOGW(TAG, "failed to open tailscale identity namespace for write (%s)", esp_err_to_name(err));
     return;
   }
 
-  const uint32_t pref_hash = esphome::fnv1a_hash(IDENTITY_PREF_KEY);
-  auto pref = esphome::global_preferences->make_preference<saved_identity_t>(pref_hash, true);
-  if (!pref.save(&saved)) {
+  err = nvs_set_blob(handle, IDENTITY_PREF_KEY, &saved, sizeof(saved));
+  if (err != ESP_OK) {
+    nvs_close(handle);
     snprintf(result_out, result_out_size, "%s", "save_fail");
-    ESP_LOGW(TAG, "failed to queue persisted tailscale identity save (hash=%" PRIu32 ")", pref_hash);
+    ESP_LOGW(TAG, "failed to write tailscale identity blob (%s)", esp_err_to_name(err));
     return;
   }
-  if (!esphome::global_preferences->sync()) {
+
+  err = nvs_commit(handle);
+  nvs_close(handle);
+  if (err != ESP_OK) {
     snprintf(result_out, result_out_size, "%s", "sync_fail");
-    ESP_LOGW(TAG, "failed to sync persisted tailscale identity (hash=%" PRIu32 ")", pref_hash);
+    ESP_LOGW(TAG, "failed to commit tailscale identity blob (%s)", esp_err_to_name(err));
     return;
   }
   snprintf(result_out, result_out_size, "%s", "nvs_saved");
-  ESP_LOGI(TAG, "persisted tailscale identity to NVS (hash=%" PRIu32 ")", pref_hash);
+  ESP_LOGI(TAG, "persisted tailscale identity to NVS");
 }
 
 static void set_socket_timeout(int sock, int timeout_ms) {
@@ -357,7 +379,7 @@ static void build_hostinfo(ts_ctrl_t *ctrl) {
   json_escape(escaped_name, sizeof(escaped_name), ctrl->machine_name);
   if (ctrl->advertised_service_port != 0) {
     snprintf(services_part, sizeof(services_part),
-             ",\"Services\":[{\"Proto\":\"tcp\",\"Port\":%u,\"Description\":\"esphome-web\"}]",
+             ",\"Services\":[{\"Proto\":\"tcp\",\"Port\":%u,\"Description\":\"esp32-service\"}]",
              (unsigned) ctrl->advertised_service_port);
   }
   if (ctrl->ingress_enabled) {

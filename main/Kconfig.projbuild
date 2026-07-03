@@ -1,0 +1,42 @@
+menu "ESP32 Tailscale COR Standalone"
+
+config TS_WIFI_SSID
+    string "WiFi SSID"
+    default "CHANGE_ME_WIFI_SSID"
+
+config TS_WIFI_PASSWORD
+    string "WiFi password"
+    default "CHANGE_ME_WIFI_PASSWORD"
+
+config TS_AUTH_KEY
+    string "Tailscale auth key"
+    default "CHANGE_ME_TAILSCALE_AUTH_KEY"
+
+config TS_DEVICE_NAME
+    string "Tailscale device name"
+    default "esp32-tailscale-cor"
+
+config TS_WIRE_INGRESS
+    bool "Advertise WireIngress hostinfo field"
+    default n
+
+config TS_INGRESS_ENABLED
+    bool "Advertise IngressEnabled hostinfo field"
+    default n
+
+config TS_ADVERTISED_SERVICE_PORT
+    int "Advertised service port"
+    range 0 65535
+    default 0
+
+config TS_STREAM_POLL_TIMEOUT_MS
+    int "Streaming poll timeout (ms)"
+    range 1000 60000
+    default 15000
+
+config TS_RETRY_DELAY_MS
+    int "Reconnect delay after failure (ms)"
+    range 1000 60000
+    default 5000
+
+endmenu
